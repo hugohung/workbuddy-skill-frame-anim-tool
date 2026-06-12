@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dll
+*.exe
+
+# 测试输出文件
+*_compressed.*
+*_colors*.*
+*_skip.*
+test_*
+
+# macOS
+.DS_Store
