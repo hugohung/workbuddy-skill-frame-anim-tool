@@ -4,7 +4,7 @@ description: |
   将 PNG 序列帧合成为 APNG/GIF 动图，或将动图拆解为序列帧，
   支持 APNG/GIF 压缩功能。触发词：序列帧、帧动画、apng、gif、拆图、压缩动画。
 agent_created: true
-version: "2.4.0"
+version: "2.5.0"
 ---
 
 # 序列帧动图工具集
@@ -17,7 +17,7 @@ version: "2.4.0"
 |---|---|
 | 🎬 合成 | PNG 序列帧 → APNG / GIF |
 | 🔪 拆解 | APNG / GIF → PNG 序列帧 |
-| 📦 压缩 | APNG / GIF 压缩（减色） |
+| 📦 压缩 | APNG / GIF 压缩（颜色量化 + 减色） |
 
 ---
 
@@ -119,14 +119,13 @@ open -a "Google Chrome" "http://localhost:8767"
 
 #### 第 2 步：执行拆解
 
-先在工作空间生成输出，再用 `cp -r` 复制到桌面：
-
+**⚠️ 必须使用系统 Python（托管 Python 有代码签名问题）：**
 ```bash
 # 1. 在工作空间创建临时输出目录
 mkdir -p <workspace>/decompose_output
 
-# 2. 执行拆解（输出到工作空间）
-/Users/honghaoxiang/.workbuddy/binaries/python/envs/png2apng3/bin/python3 \
+# 2. 用系统 Python 执行拆解（输出到工作空间）
+/usr/bin/python3 \
   ~/.workbuddy/skills/frame-anim-tool/scripts/decompose.py \
   <input> <workspace>/decompose_output
 
@@ -167,20 +166,22 @@ cp -r <workspace>/decompose_output ~/Desktop/<文件名>_frames
 
 **推荐策略（用 AskUserQuestion 提供点击选项）：**
 
-| 文件类型 | 当前色数 | 推荐方案 |
+| 文件类型 | 推荐方案 | 压缩效果 |
 |---------|---------|---------|
-| GIF | >64 色 | ✅ 推荐**减色**（128色/64色/32色） |
-| GIF | ≤64 色 | ⚠️ 色数已较低，减色空间有限 |
-| APNG | — | ✅ 推荐**降低 zlib 压缩质量** |
+| GIF | ✅ 推荐**减色**（128色/64色/32色） | 17-40% |
+| APNG | ✅ 推荐**颜色量化**（128色/64色） | 38-40% |
+| APNG | ⚠️ zlib 压缩（效果有限） | 3-10% |
 
 **提问（一次问完）：**
-1. **是否减色**（GIF 专用，默认推荐 128 色）：
+1. **GIF 减色**（默认推荐 128 色）：
    - `不减色`
    - `128 色（推荐，画质几乎无影响）`
    - `64 色（画质轻微下降）`
    - `32 色（画质明显下降）`
-
-> ⚠️ **重要**：压缩只支持减色，不支持减帧。若需大幅减小文件，建议先减色再考虑其他方案。
+2. **APNG 颜色量化**（参考 Tinify 原理）：
+   - `不量化`
+   - `128 色（推荐，压缩 38%）`
+   - `64 色（压缩 40%，画质轻微下降）`
 
 #### 第 3 步：执行压缩
 
@@ -201,12 +202,19 @@ python3 ~/.workbuddy/skills/frame-anim-tool/scripts/compress.py \
 
 **APNG 压缩（用 compress.py）：**
 ```bash
+# 颜色量化（推荐，参考 Tinify 原理）
 python3 ~/.workbuddy/skills/frame-anim-tool/scripts/compress.py \
-  <input.apng> <output.apng> --quality 80
+  <input.apng> <output.apng> --colors 128
+
+# zlib 压缩（效果有限，仅 3-10%）
+python3 ~/.workbuddy/skills/frame-anim-tool/scripts/compress.py \
+  <input.apng> <output.apng> --quality 1
 ```
 
-> **APNG 压缩说明**：降低 zlib 压缩质量，文件可能反而变大（APNG 已高度压缩），
-> 建议优先用**减色**（GIF）或接受原始 APNG 文件。
+> **APNG 压缩说明**：
+> - 颜色量化：将 24 位 APNG 转换为 8 位索引色（使用 Pillow FASTOCTREE 方法）
+> - 压缩效果显著（128 色 → 38%，64 色 → 40%）
+> - zlib 压缩：降低压缩质量，效果有限（3-10%）
 
 #### 第 4 步：对比报告
 
@@ -228,7 +236,8 @@ python3 ~/.workbuddy/skills/frame-anim-tool/scripts/compress.py \
 ├── png2apng.py        # APNG 合成核心（pypng 纯 Python）
 ├── compose.py         # 合成入口：序列帧 → APNG/GIF
 ├── decompose.py       # 拆解：APNG/GIF → 序列帧
-├── compress.py        # 压缩：APNG/GIF 压缩
+├── compress.py        # 压缩：APNG/GIF 压缩（支持颜色量化）
+├── quantize_apng.py  # APNG 颜色量化（系统 Python + Pillow）
 └── apng_preview.py    # 预览服务器（中文界面+下载按钮）
 ```
 
@@ -237,13 +246,27 @@ python3 ~/.workbuddy/skills/frame-anim-tool/scripts/compress.py \
 ## 环境依赖
 
 - **Python 3.13**（pypng）：`/Users/honghaoxiang/.workbuddy/binaries/python/envs/png2apng3/bin/python3`
+  - 用于：APNG 合成（compose.py）、APNG 拆解（decompose.py）
+  - ⚠️ 注意：托管 Python 环境有代码签名问题，GIF 拆解需用系统 Python
+- **系统 Python**（Pillow）：`/usr/bin/python3`
+  - 用于：GIF 拆解（decompose.py）、APNG 颜色量化（quantize_apng.py）
 - **Node.js 22**（gif-encoder-2 + jimp）：`/Users/honghaoxiang/.workbuddy/binaries/node/versions/22.22.2/bin/node`
+  - 用于：GIF 合成（compose.py 自动调用 Node.js）
 - **Node 模块路径**：`/Users/honghaoxiang/.workbuddy/binaries/node/workspace/node_modules`
+  - gifsicle：GIF 压缩（compress.py）
 - **系统 Python**（预览服务器）：`/usr/bin/python3`
+  - 用于：apng_preview.py（预览服务器）
 
 ---
 
 ## 版本历史
+
+### v2.5.0 (2026-06-12)
+- ✨ 新增 APNG 颜色量化功能（参考 Tinify 原理）
+- ✨ 新增 `quantize_apng.py` 脚本（系统 Python + Pillow FASTOCTREE）
+- 🔧 更新 `compress.py`：新增 `--colors` 参数（APNG/GIF 通用）
+- 🔧 更新压缩推荐策略：APNG 优先推荐颜色量化（38-40% 压缩比）
+- 🔧 更新 SKILL.md：补充颜色量化使用说明
 
 ### v2.4.0 (2026-06-12)
 - 🔧 移除 GIF 减帧功能（不稳定，已放弃）

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-compress.py - APNG/GIF 压缩
+compress.py - APNG/GIF 压缩（支持颜色量化）
 
 用法:
     python3 compress.py input.gif [--info]           # 检测信息
@@ -14,6 +14,9 @@ import sys
 import struct
 import zlib
 import subprocess
+import tempfile
+import shutil
+from PIL import Image, ImageSequence
 
 def quality_to_compress_level(q):
     """将质量百分比映射为 zlib 压缩级别"""
@@ -105,8 +108,55 @@ def print_info(info):
     print(f"  透明通道: {'是' if info['has_transparency'] else '否'}")
 
 
-def compress_apng(input_path, output_path, quality=80):
-    """压缩 APNG：降低 zlib 压缩质量"""
+def quantize_apng(input_path, output_path, colors=256):
+    """量化 APNG 颜色（参考 Tinify 原理）
+    
+    将 24 位 APNG 转换为 8 位索引色 APNG，大幅减小文件体积
+    使用系统 Python（避免托管 Python 的代码签名问题）
+    """
+    print(f"🗜️  量化 APNG: {os.path.basename(input_path)}")
+    print(f"  目标色数: {colors}")
+    
+    # 使用系统 Python 运行量化脚本
+    script_path = os.path.join(os.path.dirname(__file__), "quantize_apng.py")
+    
+    if not os.path.exists(script_path):
+        print(f"❌ 量化脚本未找到: {script_path}")
+        print(f"   请先创建 quantize_apng.py")
+        sys.exit(1)
+    
+    cmd = ["/usr/bin/python3", script_path, input_path, output_path, "--colors", str(colors)]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    
+    if result.returncode != 0:
+        print(f"❌ 量化失败:")
+        print(result.stderr)
+        sys.exit(1)
+    
+    # 输出量化结果
+    orig_size = os.path.getsize(input_path)
+    new_size = os.path.getsize(output_path)
+    ratio = (1 - new_size / orig_size) * 100
+    
+    print(f"  ✅ 量化完成")
+    print(f"  原大小: {orig_size/1024:.1f} KB")
+    print(f"  新大小: {new_size/1024:.1f} KB")
+    if abs(ratio) > 0.5:
+        print(f"  压缩比: {ratio:.1f}%")
+
+
+def compress_apng(input_path, output_path, quality=80, colors=None):
+    """压缩 APNG
+    
+    - colors: 指定目标色数（如 256, 128, 64），实现颜色量化
+    - quality: zlib 压缩质量（1-100）
+    """
+    # 如果指定了 colors，使用量化方法（效果更好）
+    if colors and colors < 256:
+        quantize_apng(input_path, output_path, colors=colors)
+        return
+    
+    # 否则只调整 zlib 压缩级别
     print(f"🗜️  压缩 APNG: {os.path.basename(input_path)}")
     print(f"  质量: {quality}%")
 
@@ -116,39 +166,83 @@ def compress_apng(input_path, output_path, quality=80):
             print("❌ 不是有效的 PNG/APNG 文件")
             sys.exit(1)
 
+        # 读取所有 chunk
         chunks = []
-        actl = None
         while True:
             length_bytes = f.read(4)
-            if len(length_bytes) == 0: break
+            if not length_bytes:
+                break
             length = struct.unpack('>I', length_bytes)[0]
             chunk_type = f.read(4)
             data = f.read(length)
             crc = f.read(4)
             chunks.append((chunk_type, data))
-            if chunk_type == b'acTL':
-                num_frames = struct.unpack('>I', data[:4])[0]
-                actl = {'frames': num_frames}
 
-    if not actl:
+    # 检查是否是 APNG
+    is_apng = any(ct == b'acTL' for ct, _ in chunks)
+    if not is_apng:
         print("⚠️  这不是 APNG 文件，跳过压缩")
         return
 
     compress_level = quality_to_compress_level(quality)
+
+    # 重新构建 APNG，正确重新压缩数据块
+    new_chunks = []
+    next_seq = 0  # 全局序列号（fcTL 和 fdAT 共享）
+
+    i = 0
+    while i < len(chunks):
+        ct, data = chunks[i]
+
+        if ct == b'fcTL':
+            # fcTL：更新序列号，保留其他数据
+            new_data = struct.pack('>I', next_seq) + data[4:]
+            new_chunks.append((b'fcTL', new_data))
+            next_seq += 1
+            i += 1
+
+        elif ct == b'IDAT':
+            # 拼接所有连续的 IDAT chunk 数据（属于同一个 zlib 流）
+            all_data = b''
+            while i < len(chunks) and chunks[i][0] == b'IDAT':
+                all_data += chunks[i][1]
+                i += 1
+
+            # 解压 → 重新压缩
+            raw = zlib.decompress(all_data)
+            new_compressed = zlib.compress(raw, compress_level)
+
+            # 拆分回 65535 字节的 chunk
+            for j in range(0, len(new_compressed), 65535):
+                new_chunks.append((b'IDAT', new_compressed[j:j+65535]))
+
+        elif ct == b'fdAT':
+            # 拼接所有连续的 fdAT chunk 数据（跳过每个 chunk 前 4 字节的序列号）
+            all_data = b''
+            while i < len(chunks) and chunks[i][0] == b'fdAT':
+                all_data += chunks[i][1][4:]  # 跳过序列号
+                i += 1
+
+            # 解压 → 重新压缩
+            raw = zlib.decompress(all_data)
+            new_compressed = zlib.compress(raw, compress_level)
+
+            # 拆分回 chunk，加上新的序列号
+            for j in range(0, len(new_compressed), 65535):
+                seq_bytes = struct.pack('>I', next_seq)
+                next_seq += 1
+                new_chunks.append((b'fdAT', seq_bytes + new_compressed[j:j+65535]))
+
+        else:
+            # 其他 chunk 原样保留
+            new_chunks.append((ct, data))
+            i += 1
+
+    # 写入新文件
     with open(output_path, 'wb') as out:
         out.write(sig)
-        for chunk_type, data in chunks:
-            if chunk_type == b'IDAT' or chunk_type == b'fdAT':
-                if chunk_type == b'fdAT':
-                    seq = data[:4]
-                    raw_data = zlib.decompress(data[4:])
-                    new_data = seq + zlib.compress(raw_data, compress_level)
-                else:
-                    raw_data = zlib.decompress(data)
-                    new_data = zlib.compress(raw_data, compress_level)
-                _write_chunk(out, chunk_type, new_data)
-            else:
-                _write_chunk(out, chunk_type, data)
+        for ct, data in new_chunks:
+            _write_chunk(out, ct, data)
 
     orig_size = os.path.getsize(input_path)
     new_size = os.path.getsize(output_path)
@@ -156,14 +250,12 @@ def compress_apng(input_path, output_path, quality=80):
     print(f"  ✅ 压缩完成")
     print(f"  原大小: {orig_size/1024:.1f} KB")
     print(f"  新大小: {new_size/1024:.1f} KB")
-    print(f"  压缩比: {ratio:.1f}%")
+    if abs(ratio) > 0.5:
+        print(f"  压缩比: {ratio:.1f}%")
 
 
 def compress_gif(input_path, output_path, colors=None):
     """压缩 GIF：调用 gifsicle（直接操作二进制结构，只减色）
-
-    - 减色：调用 gifsicle --colors（快，无乱码）
-    - 不支持减帧（已移除）
     """
     print(f"🗜️  压缩 GIF: {os.path.basename(input_path)}")
 
@@ -212,12 +304,12 @@ def _write_chunk(f, chunk_type, data):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='APNG/GIF 压缩')
+    parser = argparse.ArgumentParser(description='APNG/GIF 压缩（支持颜色量化）')
     parser.add_argument('input', help='输入的 APNG/GIF 文件路径')
     parser.add_argument('output', nargs='?', help='输出路径（默认加 _compressed）')
     parser.add_argument('--info', action='store_true', help='只检测文件信息，不压缩')
-    parser.add_argument('--colors', type=int, help='GIF 色数（32/64/128/256）')
-    parser.add_argument('--quality', type=int, default=80, help='APNG 画质 1-100（默认 80）')
+    parser.add_argument('--colors', type=int, help='颜色量化（APNG/GIF 通用，如 256/128/64）')
+    parser.add_argument('--quality', type=int, default=80, help='APNG zlib 画质 1-100（默认 80）')
     args = parser.parse_args()
 
     ext = os.path.splitext(args.input)[1].lower()
@@ -237,14 +329,15 @@ def main():
     # 压缩模式
     if not args.output:
         base = os.path.splitext(args.input)[0]
-        args.output = f"{base}_compressed{ext}"
+        suffix = f"_c{args.colors}" if args.colors else "_compressed"
+        args.output = f"{base}{suffix}{ext}"
 
     if ext == '.gif':
         compress_gif(args.input, args.output, colors=args.colors)
     elif ext in ['.apng', '.png']:
         info = detect_apng_info(args.input)
         if info.get('frames'):
-            compress_apng(args.input, args.output, quality=args.quality)
+            compress_apng(args.input, args.output, quality=args.quality, colors=args.colors)
         else:
             print("⚠️  这不是 APNG，跳过压缩")
     else:
