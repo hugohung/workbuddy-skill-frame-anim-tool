@@ -4,7 +4,7 @@ description: |
   将 PNG 序列帧合成为 APNG/GIF 动图，或将动图拆解为序列帧，
   支持 APNG/GIF 压缩功能。触发词：序列帧、帧动画、apng、gif、拆图、压缩动画。
 agent_created: true
-version: "2.5.0"
+version: "2.6.0"
 ---
 
 # 序列帧动图工具集

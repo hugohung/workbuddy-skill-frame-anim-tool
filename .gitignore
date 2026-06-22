@@ -11,6 +11,10 @@ __pycache__/
 *_colors*.*
 *_skip.*
 test_*
+*.apng
+*.gif
+*拆解.png
+frame_anim_tool_test/
 
 # macOS
 .DS_Store

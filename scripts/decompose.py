@@ -128,36 +128,46 @@ def decompose_apng(apng_path, output_dir):
 
 
 def decompose_gif(gif_path, output_dir):
-    """拆解 GIF 为 PNG 序列帧"""
+    """拆解 GIF 为 PNG 序列帧（使用 Pillow，无需 imageio）"""
     print(f"📂 拆解 GIF: {os.path.basename(gif_path)}")
-    print("  ⚠️  需要 imageio 库，尝试中...")
-
+    
     try:
-        import imageio.v3 as iio
+        from PIL import Image, ImageSequence
     except ImportError:
-        print("❌ 缺少 imageio 库")
-        print("   请运行: pip install imageio imageio-ffmpeg")
+        print("❌ 缺少 Pillow 库")
+        print("   请运行: pip install Pillow")
         sys.exit(1)
-
+    
     try:
-        frames = iio.imread(gif_path)
-        print(f"  读取 {len(frames)} 帧")
-        print(f"  帧尺寸: {frames[0].shape}")
-
+        gif = Image.open(gif_path)
+        frames = []
+        
+        # 使用 ImageSequence.Iterator 遍历所有帧
+        for i, frame in enumerate(ImageSequence.Iterator(gif)):
+            frames.append(frame.copy())
+        
+        print(f"  总帧数: {len(frames)}")
+        print(f"  尺寸: {frames[0].size[0]} x {frames[0].size[1]}")
+        
         os.makedirs(output_dir, exist_ok=True)
         print(f"  输出目录: {output_dir}")
-
+        
         for i, frame in enumerate(frames):
             out_path = os.path.join(output_dir, f"frame_{i+1:04d}.png")
-            iio.imwrite(out_path, frame)
-            if (i + 1) % 5 == 0 or i == len(frames) - 1:
+            # 转换为 RGBA 以保留透明通道
+            if frame.mode != 'RGBA':
+                frame = frame.convert('RGBA')
+            frame.save(out_path, 'PNG')
+            if (i + 1) % 10 == 0 or i == len(frames) - 1:
                 print(f"  已处理 {i+1}/{len(frames)} 帧")
-
+        
         print(f"\n✅ 共导出 {len(frames)} 帧到: {output_dir}")
         return output_dir
-
+        
     except Exception as e:
         print(f"❌ GIF 拆解失败: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
